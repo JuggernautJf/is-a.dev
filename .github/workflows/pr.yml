@@ -363,3 +363,123 @@ jobs:
               run: |
                   echo "::error::PR template is incomplete."
                   exit 1
+
+    vercel-protection:
+        name: Vercel Deployment Protection
+        # Only runs after the PR template validation has succeeded
+        needs: template
+        runs-on: ubuntu-latest
+        # This check is advisory, it must never fail the PR
+        continue-on-error: true
+
+        concurrency:
+            group: vercel-protection-${{ github.event.pull_request.number }}
+            cancel-in-progress: true
+
+        permissions:
+            contents: read
+            pull-requests: read
+
+        steps:
+            # Never check out the PR head here, only the trusted default branch
+            - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+              with:
+                  ref: ${{ github.event.repository.default_branch }}
+                  persist-credentials: false
+                  sparse-checkout: util
+
+            - name: Check website preview
+              id: check
+              continue-on-error: true
+              uses: actions/github-script@v8
+              env:
+                  PR_BODY: ${{ github.event.pull_request.body }}
+              with:
+                  script: |
+                      const checker = require(`${process.env.GITHUB_WORKSPACE}/util/check-vercel-protection.cjs`);
+
+                      try {
+                          const files = await github.paginate(
+                              github.rest.pulls.listFiles,
+                              {
+                                  owner: context.repo.owner,
+                                  repo: context.repo.repo,
+                                  pull_number: context.issue.number,
+                                  per_page: 100
+                              }
+                          );
+
+                          const result = await checker.runCheck({
+                              files,
+                              body: process.env.PR_BODY || ""
+                          });
+
+                          for (const note of result.notes) {
+                              core.info(note);
+                          }
+
+                          core.info(`Outcome: ${result.outcome}`);
+                          core.setOutput("result", result.outcome);
+                          core.setOutput("sites", JSON.stringify(result.protectedSites));
+                      } catch (error) {
+                          core.warning(`Vercel Deployment Protection check was inconclusive: ${error.message}`);
+                          core.setOutput("result", "inconclusive");
+                      }
+
+            - name: Update warning comment
+              if: contains(fromJSON('["protected", "accessible", "not-applicable"]'), steps.check.outputs.result)
+              continue-on-error: true
+              uses: actions/github-script@v8
+              env:
+                  VERCEL_CHECK_RESULT: ${{ steps.check.outputs.result }}
+                  VERCEL_PROTECTED_SITES: ${{ steps.check.outputs.sites }}
+              with:
+                  github-token: ${{ secrets.BOT }}
+                  script: |
+                      const checker = require(`${process.env.GITHUB_WORKSPACE}/util/check-vercel-protection.cjs`);
+
+                      const comments = await github.paginate(
+                          github.rest.issues.listComments,
+                          {
+                              owner: context.repo.owner,
+                              repo: context.repo.repo,
+                              issue_number: context.issue.number
+                          }
+                      );
+
+                      const existing = comments.filter(
+                          (comment) =>
+                              comment.user?.login === "is-a-dev-bot" &&
+                              comment.body?.includes(checker.COMMENT_MARKER)
+                      );
+
+                      if (process.env.VERCEL_CHECK_RESULT !== "protected") {
+                          // The website is accessible or the check no longer applies
+                          for (const comment of existing) {
+                              await github.rest.issues.deleteComment({
+                                  owner: context.repo.owner,
+                                  repo: context.repo.repo,
+                                  comment_id: comment.id
+                              });
+                          }
+
+                          return;
+                      }
+
+                      const body = checker.buildComment(JSON.parse(process.env.VERCEL_PROTECTED_SITES));
+
+                      if (existing.length === 0) {
+                          await github.rest.issues.createComment({
+                              owner: context.repo.owner,
+                              repo: context.repo.repo,
+                              issue_number: context.issue.number,
+                              body
+                          });
+                      } else if (existing[0].body !== body) {
+                          await github.rest.issues.updateComment({
+                              owner: context.repo.owner,
+                              repo: context.repo.repo,
+                              comment_id: existing[0].id,
+                              body
+                          });
+                      }
