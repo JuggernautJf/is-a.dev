@@ -484,7 +484,10 @@ jobs:
                           });
                       }
 
-                      const body = checker.buildComment(JSON.parse(process.env.VERCEL_PROTECTED_SITES));
+                      const body = checker.buildComment(JSON.parse(process.env.VERCEL_PROTECTED_SITES), {
+                          repository: `${context.repo.owner}/${context.repo.repo}`,
+                          branch: context.payload.repository.default_branch
+                      });
 
                       if (existing.length === 0) {
                           await github.rest.issues.createComment({

@@ -1,4 +1,4 @@
-// Advisory check: detects Vercel preview websites that have Deployment Protection enabled.
+// Detects Vercel preview websites that have Deployment Protection enabled.
 //
 // This file is loaded by .github/workflows/pr.yml from the default branch. It must never
 // read or execute anything from the PR head: the only PR-controlled inputs are the list of
@@ -9,7 +9,7 @@ const COMMENT_MARKER = "<!-- is-a-dev-bot: vercel-deployment-protection -->";
 const PREVIEW_START = "<!-- WEBSITE_PREVIEW_START -->";
 const PREVIEW_END = "<!-- WEBSITE_PREVIEW_END -->";
 
-const VERCEL_FILE_REGEX = /^domains\/_vercel\.[^./]+\.json$/;
+const DOMAIN_FILE_REGEX = /^domains\/[^/]+\.json$/;
 const PREVIEW_HOST_SUFFIX = ".vercel.app";
 
 // A protected deployment answers with a redirect to Vercel's SSO flow. The first hop is
@@ -20,18 +20,19 @@ const PROTECTION_PATHS = ["/sso-api", "/sso/access/request"];
 const MAX_CHECKED_URLS = 3;
 const REQUEST_TIMEOUT_MS = 10000;
 
-const MEDIA_BASE = "https://raw.githubusercontent.com/is-a-dev/register/main/media/vercel-deployment-protection";
+const MEDIA_PATH = "media/vercel-deployment-protection";
 
 function countOccurrences(text, needle) {
     return text.split(needle).length - 1;
 }
 
 /**
- * Whether the PR adds or modifies (but does not delete) a domains/_vercel.<name>.json file.
+ * Whether the PR adds or modifies (but does not delete) a domains/<name>.json file. This
+ * includes Vercel verification files (domains/_vercel.<name>.json).
  * `files` is the response of the "list pull request files" API.
  */
-function touchesVercelFile(files) {
-    return files.some((file) => file.status !== "removed" && VERCEL_FILE_REGEX.test(file.filename));
+function touchesDomainFile(files) {
+    return files.some((file) => file.status !== "removed" && DOMAIN_FILE_REGEX.test(file.filename));
 }
 
 /**
@@ -94,11 +95,21 @@ function validatePreviewUrl(link) {
         return { ok: false, reason: "its hostname is not a subdomain of vercel.app" };
     }
 
+    // The hostname is echoed in a comment, so it may only contain plain DNS characters
+    if (!/^[a-z0-9-]+(\.[a-z0-9-]+)*$/.test(url.hostname)) {
+        return { ok: false, reason: "its hostname contains unexpected characters" };
+    }
+
     return { ok: true, url };
 }
 
 /**
  * Classifies a response that was fetched without following redirects.
+ *
+ * - A redirect to Vercel's SSO pages means the deployment is protected.
+ * - A successful response, or a redirect to anywhere outside of vercel.com (for example
+ *   to /en or to a custom domain), means there is no login protection in front of it.
+ * - Everything else (errors, other vercel.com redirects) is inconclusive.
  */
 function classifyResponse(status, location, requestUrl) {
     if (status >= 300 && status < 400 && location) {
@@ -118,7 +129,11 @@ function classifyResponse(status, location, requestUrl) {
             return "protected";
         }
 
-        return "inconclusive";
+        if (target.hostname === PROTECTION_HOST || target.hostname.endsWith(`.${PROTECTION_HOST}`)) {
+            return "inconclusive";
+        }
+
+        return "accessible";
     }
 
     if (status >= 200 && status < 300) {
@@ -153,9 +168,9 @@ async function checkUrl(url, fetchImpl = fetch) {
  * Runs the whole check.
  *
  * Outcomes:
- * - "not-applicable": no _vercel file is touched, or there is no eligible preview link.
+ * - "not-applicable": no domain file is added or modified, or there is no eligible preview link.
  * - "protected": at least one preview link redirects to Vercel's login protection.
- * - "accessible": every eligible preview link responded successfully.
+ * - "accessible": every eligible preview website responded without login protection.
  * - "inconclusive": anything else.
  *
  * `protectedSites` only contains origins (https://<hostname>) so that it is safe to
@@ -164,8 +179,8 @@ async function checkUrl(url, fetchImpl = fetch) {
 async function runCheck({ files, body, fetchImpl }) {
     const notes = [];
 
-    if (!touchesVercelFile(files)) {
-        notes.push("No domains/_vercel.<name>.json file is added or modified, nothing to check.");
+    if (!touchesDomainFile(files)) {
+        notes.push("No domains/<name>.json file is added or modified, nothing to check.");
         return { outcome: "not-applicable", protectedSites: [], notes };
     }
 
@@ -182,7 +197,10 @@ async function runCheck({ files, body, fetchImpl }) {
         const validation = validatePreviewUrl(link);
 
         if (validation.ok) {
-            eligible.set(validation.url.href, validation.url);
+            // Protection applies to a whole deployment, so each website is only checked once
+            if (!eligible.has(validation.url.origin)) {
+                eligible.set(validation.url.origin, validation.url);
+            }
         } else {
             notes.push(`Skipped ${JSON.stringify(link)} because ${validation.reason}.`);
         }
@@ -197,7 +215,7 @@ async function runCheck({ files, body, fetchImpl }) {
     const checked = urls.slice(0, MAX_CHECKED_URLS);
 
     if (urls.length > checked.length) {
-        notes.push(`Found ${urls.length} eligible links, only the first ${checked.length} were checked.`);
+        notes.push(`Found ${urls.length} eligible websites, only the first ${checked.length} were checked.`);
     }
 
     const protectedSites = new Set();
@@ -224,7 +242,13 @@ async function runCheck({ files, body, fetchImpl }) {
     return { outcome: allAccessible ? "accessible" : "inconclusive", protectedSites: [], notes };
 }
 
-function buildComment(protectedSites) {
+/**
+ * `repository` (owner/name) and `branch` say where the screenshots are hosted. The workflow
+ * passes the repository it runs in and its default branch, so the images also load on forks.
+ */
+function buildComment(protectedSites, { repository = "is-a-dev/register", branch = "main" } = {}) {
+    const mediaBase = `https://raw.githubusercontent.com/${repository}/${encodeURIComponent(branch)}/${MEDIA_PATH}`;
+
     return [
         COMMENT_MARKER,
         "## ⚠️ Website preview requires a Vercel login",
@@ -248,24 +272,24 @@ function buildComment(protectedSites) {
         "<table>",
         "  <tr>",
         '    <td align="center">',
-        `      <img width="299" alt="Vercel project settings" src="${MEDIA_BASE}/step-1-settings.png" />`,
+        `      <img width="299" alt="Vercel project settings" src="${mediaBase}/step-1-settings.png" />`,
         "      <br><br>",
         "      <b>Step 1: Go to your project Settings</b>",
         "    </td>",
         '    <td align="center">',
-        `      <img width="292" alt="Vercel Deployment Protection menu" src="${MEDIA_BASE}/step-2-deployment-protection.png" />`,
+        `      <img width="292" alt="Vercel Deployment Protection menu" src="${mediaBase}/step-2-deployment-protection.png" />`,
         "      <br><br>",
         "      <b>Step 2: Select Deployment Protection</b>",
         "    </td>",
         "  </tr>",
         "</table>",
         "",
-        `<img width="1080" alt="Toggle off Require Login" src="${MEDIA_BASE}/step-3-disable-require-login.png" />`,
+        `<img width="1080" alt="Toggle off Require Login" src="${mediaBase}/step-3-disable-require-login.png" />`,
         "<br><br>",
         '<b>Step 3: Turn off "Require Login" and save changes</b>',
         "",
         "---",
-        "Once fixed, edit your PR description to run this check again. *This is an advisory warning, it does not block your PR.*"
+        "Once fixed, edit your PR description to run this check again."
     ].join("\n");
 }
 
@@ -276,6 +300,6 @@ module.exports = {
     classifyResponse,
     extractPreviewLinks,
     runCheck,
-    touchesVercelFile,
+    touchesDomainFile,
     validatePreviewUrl
 };
