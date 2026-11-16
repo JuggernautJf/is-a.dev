@@ -2,7 +2,7 @@ import t from "ava";
 
 import checker from "../util/check-vercel-protection.cjs";
 
-const { buildComment, classifyResponse, extractPreviewLinks, runCheck, touchesVercelFile, validatePreviewUrl } =
+const { buildComment, classifyResponse, extractPreviewLinks, runCheck, touchesDomainFile, validatePreviewUrl } =
     checker;
 
 const START = "<!-- WEBSITE_PREVIEW_START -->";
@@ -31,15 +31,26 @@ function fakeFetch(responses, calls = []) {
 
 const vercelFile = [{ filename: "domains/_vercel.abc.json", status: "added" }];
 
-t("Vercel protection check only applies to non-deleted _vercel files", (t) => {
-    t.true(touchesVercelFile([{ filename: "domains/_vercel.abc.json", status: "added" }]));
-    t.true(touchesVercelFile([{ filename: "domains/_vercel.abc.json", status: "modified" }]));
-    t.false(touchesVercelFile([{ filename: "domains/_vercel.abc.json", status: "removed" }]));
-    t.false(touchesVercelFile([{ filename: "domains/abc.json", status: "added" }]));
-    t.false(touchesVercelFile([{ filename: "domains/_vercel.json", status: "added" }]));
-    t.false(touchesVercelFile([{ filename: "domains/_vercel.a.b.json", status: "added" }]));
-    t.false(touchesVercelFile([{ filename: "other/domains/_vercel.abc.json", status: "added" }]));
-    t.false(touchesVercelFile([]));
+t("Vercel protection check only applies to non-deleted domain files", (t) => {
+    t.true(touchesDomainFile([{ filename: "domains/_vercel.abc.json", status: "added" }]));
+    t.true(touchesDomainFile([{ filename: "domains/_vercel.abc.json", status: "modified" }]));
+    t.true(touchesDomainFile([{ filename: "domains/abc.json", status: "added" }]));
+    t.true(touchesDomainFile([{ filename: "domains/a.b.json", status: "renamed" }]));
+    t.true(
+        touchesDomainFile([
+            { filename: "domains/old.json", status: "removed" },
+            { filename: "domains/new.json", status: "added" }
+        ])
+    );
+
+    t.false(touchesDomainFile([{ filename: "domains/_vercel.abc.json", status: "removed" }]));
+    t.false(touchesDomainFile([{ filename: "domains/abc.json", status: "removed" }]));
+    t.false(touchesDomainFile([{ filename: "domains/abc.txt", status: "added" }]));
+    t.false(touchesDomainFile([{ filename: "domains/nested/abc.json", status: "added" }]));
+    t.false(touchesDomainFile([{ filename: "other/domains/abc.json", status: "added" }]));
+    t.false(touchesDomainFile([{ filename: "util/reserved.json", status: "modified" }]));
+    t.false(touchesDomainFile([{ filename: "README.md", status: "modified" }]));
+    t.false(touchesDomainFile([]));
 });
 
 t("Vercel protection check extracts the set of links between the preview markers", (t) => {
@@ -101,6 +112,8 @@ t("Vercel protection check only allows HTTPS *.vercel.app URLs", (t) => {
         "https://user:pass@abc.vercel.app",
         "https://abc.vercel.app:8443",
         "https://abc.vercel.app.",
+        "https://**abc**.vercel.app",
+        "https://a_b.vercel.app",
         "https://abc.vercel.com",
         "https://",
         "not a url"
@@ -118,12 +131,17 @@ t("Vercel protection check only detects redirects to the Vercel SSO pages", (t) 
     t.is(classifyResponse(200, null, url), "accessible");
     t.is(classifyResponse(204, null, url), "accessible");
 
+    // Redirects away from vercel.com are not a login protection
+    t.is(classifyResponse(308, "/en", url), "accessible");
+    t.is(classifyResponse(302, "/sso-api", url), "accessible");
+    t.is(classifyResponse(301, "https://example.com/", url), "accessible");
+    t.is(classifyResponse(302, "https://vercel.com.attacker.example/sso-api", url), "accessible");
+    t.is(classifyResponse(302, "https://attacker.example/sso/access/request", url), "accessible");
+
     t.is(classifyResponse(302, "https://vercel.com/login", url), "inconclusive");
     t.is(classifyResponse(302, "https://vercel.com/sso-api/other", url), "inconclusive");
     t.is(classifyResponse(302, "http://vercel.com/sso-api", url), "inconclusive");
-    t.is(classifyResponse(302, "https://vercel.com.attacker.example/sso-api", url), "inconclusive");
-    t.is(classifyResponse(302, "https://attacker.example/sso/access/request", url), "inconclusive");
-    t.is(classifyResponse(302, "/sso-api", url), "inconclusive");
+    t.is(classifyResponse(302, "https://api.vercel.com/sso-api", url), "inconclusive");
     t.is(classifyResponse(302, "https://", url), "inconclusive");
     t.is(classifyResponse(302, null, url), "inconclusive");
     t.is(classifyResponse(200, SSO_REDIRECT, url), "accessible");
@@ -137,7 +155,7 @@ t("Vercel protection check makes no requests when it does not apply", async (t) 
     const fetchImpl = fakeFetch({}, calls);
 
     const noFile = await runCheck({
-        files: [{ filename: "domains/abc.json", status: "added" }],
+        files: [{ filename: "README.md", status: "modified" }],
         body: body("https://abc.vercel.app"),
         fetchImpl
     });
@@ -227,7 +245,19 @@ t("Vercel protection check handles multiple preview links", async (t) => {
     t.is(anyProtected.outcome, "protected");
     t.deepEqual(anyProtected.protectedSites, ["https://def.vercel.app"]);
 
-    // No more than 3 links are requested, so more accessible links than that are inconclusive
+    // The same website is only requested once
+    const sameSiteCalls = [];
+
+    const sameSite = await runCheck({
+        files: vercelFile,
+        body: body("https://abc.vercel.app https://abc.vercel.app/about https://abc.vercel.app/?x=1"),
+        fetchImpl: fakeFetch({ "https://abc.vercel.app/": { status: 200 } }, sameSiteCalls)
+    });
+
+    t.is(sameSite.outcome, "accessible");
+    t.is(sameSiteCalls.length, 1);
+
+    // No more than 3 websites are requested, so more accessible websites than that are inconclusive
     const calls = [];
     const responses = {};
     const links = ["a", "b", "c", "d", "e"].map((name) => `https://${name}.vercel.app/`);
@@ -249,4 +279,17 @@ t("Vercel protection comment contains the marker and the protected sites", (t) =
 
     t.true(comment.startsWith(checker.COMMENT_MARKER));
     t.true(comment.includes("- https://abc.vercel.app"));
+    t.true(
+        comment.includes(
+            "https://raw.githubusercontent.com/is-a-dev/register/main/media/vercel-deployment-protection/step-1-settings.png"
+        )
+    );
+
+    const forkComment = buildComment(["https://abc.vercel.app"], { repository: "someone/fork", branch: "test" });
+
+    t.true(
+        forkComment.includes(
+            "https://raw.githubusercontent.com/someone/fork/test/media/vercel-deployment-protection/step-1-settings.png"
+        )
+    );
 });
