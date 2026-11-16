@@ -446,9 +446,19 @@ jobs:
                           }
                       );
 
+                      // Only touch comments written by the account this token belongs to
+                      let botLogin = "is-a-dev-bot";
+
+                      try {
+                          const { data: user } = await github.rest.users.getAuthenticated();
+                          botLogin = user.login;
+                      } catch (error) {
+                          core.info(`Could not look up the bot account, assuming ${botLogin}: ${error.message}`);
+                      }
+
                       const existing = comments.filter(
                           (comment) =>
-                              comment.user?.login === "is-a-dev-bot" &&
+                              comment.user?.login === botLogin &&
                               comment.body?.includes(checker.COMMENT_MARKER)
                       );
 
@@ -463,6 +473,15 @@ jobs:
                           }
 
                           return;
+                      }
+
+                      // Keep a single warning comment
+                      for (const comment of existing.slice(1)) {
+                          await github.rest.issues.deleteComment({
+                              owner: context.repo.owner,
+                              repo: context.repo.repo,
+                              comment_id: comment.id
+                          });
                       }
 
                       const body = checker.buildComment(JSON.parse(process.env.VERCEL_PROTECTED_SITES));
