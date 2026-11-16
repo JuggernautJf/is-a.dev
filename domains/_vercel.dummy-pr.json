@@ -3,6 +3,6 @@
     "username": "JuggernautJf"
   },
   "records": {
-    "TXT": "vc-domain-verify=dummy_pr.is-a.dev,0000000000000000test"
+    "TXT": "vc-domain-verify=dummy-pr.is-a.dev,0000000000000000test"
   }
 }
