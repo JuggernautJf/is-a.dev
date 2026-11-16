@@ -419,19 +419,19 @@ jobs:
                           }
 
                           core.info(`Outcome: ${result.outcome}`);
-                          core.setOutput("result", result.outcome);
+                          core.setOutput("check_result", result.outcome);
                           core.setOutput("sites", JSON.stringify(result.protectedSites));
                       } catch (error) {
                           core.warning(`Vercel Deployment Protection check was inconclusive: ${error.message}`);
-                          core.setOutput("result", "inconclusive");
+                          core.setOutput("check_result", "inconclusive");
                       }
 
             - name: Update warning comment
-              if: contains(fromJSON('["protected", "accessible", "not-applicable"]'), steps.check.outputs.result)
+              if: contains(fromJSON('["protected", "accessible", "not-applicable"]'), steps.check.outputs.check_result)
               continue-on-error: true
               uses: actions/github-script@v8
               env:
-                  VERCEL_CHECK_RESULT: ${{ steps.check.outputs.result }}
+                  VERCEL_CHECK_RESULT: ${{ steps.check.outputs.check_result }}
                   VERCEL_PROTECTED_SITES: ${{ steps.check.outputs.sites }}
               with:
                   github-token: ${{ secrets.BOT }}
