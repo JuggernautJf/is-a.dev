@@ -369,8 +369,7 @@ jobs:
         # Only runs after the PR template validation has succeeded
         needs: template
         runs-on: ubuntu-latest
-        # This check is advisory, it must never fail the PR
-        continue-on-error: true
+        # Only a detected protection fails this job. Errors and inconclusive results never do.
 
         concurrency:
             group: vercel-protection-${{ github.event.pull_request.number }}
@@ -483,3 +482,9 @@ jobs:
                               body
                           });
                       }
+
+            - name: Fail if deployment protection is enabled
+              if: steps.check.outputs.check_result == 'protected'
+              run: |
+                  echo "::error::The website preview requires a Vercel login. Disable Vercel Deployment Protection so reviewers can view it."
+                  exit 1
